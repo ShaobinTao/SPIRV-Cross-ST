@@ -12911,10 +12911,28 @@ string CompilerMSL::to_func_call_arg(const SPIRFunction::Parameter &arg, uint32_
 	}
 	// Dereference pointer variables where needed.
 	// FIXME: This dereference is actually backwards. We should really just support passing pointer variables between functions.
-	else if (should_dereference_caller_param(id))
-		arg_str += dereference_expression(type, CompilerGLSL::to_func_call_arg(arg, id));
 	else
-		arg_str += CompilerGLSL::to_func_call_arg(arg, id);
+	{
+		auto &parameter_type = get<SPIRType>(arg.type);
+		auto &value_type = expression_type(id);
+		auto &pointee_type = get_pointee_type(parameter_type);
+		bool is_our_case = is_pointer(parameter_type) && !is_physical_pointer(parameter_type) &&
+		                   (pointee_type.basetype == SPIRType::UByte || pointee_type.basetype == SPIRType::SByte ||
+		                    pointee_type.basetype == SPIRType::Char) && get<SPIRType>(parameter_type.parent_type).array.empty();
+
+		if (is_our_case)
+		{
+			// Don't dereference, and if we are not passing a pointer, take the address.
+			if (is_pointer(value_type))
+				arg_str += CompilerGLSL::to_func_call_arg(arg, id);
+			else
+				arg_str += address_of_expression(CompilerGLSL::to_func_call_arg(arg, id));
+		}
+		else if (should_dereference_caller_param(id))
+			arg_str += dereference_expression(type, CompilerGLSL::to_func_call_arg(arg, id));
+		else
+			arg_str += CompilerGLSL::to_func_call_arg(arg, id);
+	}
 
 	// Need to check the base variable in case we need to apply a qualified alias.
 	uint32_t var_id = 0;
@@ -15801,9 +15819,16 @@ string CompilerMSL::argument_decl(const SPIRFunction::Parameter &arg)
 	StorageClass type_storage = var_type.storage;
 
 	// Physical pointer types are passed by pointer, not reference.
-	auto &data_type = get_variable_data_type(var);
+	auto &data_type = (var.storage == StorageClassFunction) ? var_type : get_variable_data_type(var);
 	bool passed_by_value = is_physical_pointer(var_type);
-	auto &type = passed_by_value ? var_type : data_type;
+
+	// Test for pointer-to-scalar.
+	auto &pointee_type = get_pointee_type(var_type);
+	bool is_our_case = is_pointer(var_type) &&
+	                   (pointee_type.basetype == SPIRType::UByte || pointee_type.basetype == SPIRType::SByte ||
+	                    pointee_type.basetype == SPIRType::Char) && get<SPIRType>(var_type.parent_type).array.empty();
+
+	auto &type = passed_by_value || is_our_case ? var_type : data_type;
 
 	// If we need to modify the name of the variable, make sure we use the original variable.
 	// Our alias is just a shadow variable.
@@ -16027,7 +16052,8 @@ string CompilerMSL::argument_decl(const SPIRFunction::Parameter &arg)
 				decl = join(address_space, " ", decl);
 		}
 
-		decl += "&";
+		if (!is_pointer(data_type) || !is_scalar(get_pointee_type(data_type)))
+			decl += "&";
 		decl += " ";
 		decl += to_restrict(name_id, true);
 		decl += to_expression(name_id);
